@@ -31,7 +31,8 @@ def login(data: schemas.LoginRequest, db: Session = Depends(get_db)):
 # Google OAuth: Login URL
 @router.get("/google/login")
 def google_login():
-    return {"login_url": generate_google_login_url()}
+    # PERBAIKAN 1: Gunakan RedirectResponse agar langsung ke halaman Google
+    return RedirectResponse(url=generate_google_login_url())
 
 # Google OAuth Callback
 @router.get("/google/callback")
@@ -40,46 +41,60 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
         # 1. Ambil data user dari Google
         google_user = await get_google_user(code)
     except Exception as e:
-        # Jika gagal, kembalikan error yang jelas
         raise HTTPException(status_code=400, detail=f"Google Auth Error: {str(e)}")
 
-    email = google_user["email"]
+    email = google_user.get("email")
     name = google_user.get("name", "")
     picture = google_user.get("picture", "")
 
-    # 2. Cek apakah user sudah ada di database
+    # 2. Cek apakah user sudah ada
     existing_user = db.query(models.User).filter(models.User.email == email).first()
 
     if not existing_user:
-        # Jika belum ada, buat user baru
         username = email.split("@")[0]
+
+        # PERBAIKAN 2: Buat User TANPA field 'name' (karena 'name' ada di Profile)
         new_user = models.User(
-            name=name,
             email=email,
             username=username,
             password="oauth_user", # Password dummy
-            # pict=picture # Uncomment jika kolom pict sudah ada di model
         )
         db.add(new_user)
         db.commit()
-        db.refresh(new_user)
+        db.refresh(new_user) # Dapatkan ID user baru
+
+        # PERBAIKAN 3: Buat Profile secara manual dan hubungkan ke User
+        new_profile = models.Profile(
+            user_id=new_user.id,
+            name=name,      # Simpan nama di tabel Profile
+            pict=picture,   # Simpan foto di tabel Profile
+            role="Member",  # Default role
+            skill=""        # Default skill kosong
+        )
+        db.add(new_profile)
+        db.commit()
+        
         user = new_user
     else:
         user = existing_user
 
     # 3. Buat Token JWT
     token = create_access_token({
-        "user_id": str(user.id), # Pastikan ID dikonversi ke string
+        "user_id": str(user.id),
         "email": user.email
     })
 
     # 4. Siapkan data untuk dikirim ke Frontend
+    # Ambil nama dari profile jika user sudah ada
+    display_name = user.profile.name if user.profile else name
+    display_pict = user.profile.pict if user.profile else picture
+
     user_data = {
         "id": str(user.id),
         "email": user.email,
-        "name": user.name,
+        "name": display_name,
         "username": user.username,
-        "avatar": picture
+        "avatar": display_pict
     }
     
     # Encode data JSON agar aman di URL
@@ -87,7 +102,7 @@ async def google_callback(code: str, db: Session = Depends(get_db)):
     encoded_user = urllib.parse.quote(user_data_json)
     
     # 5. Redirect ke halaman Frontend
-    # Pastikan port 3000 atau 3001 sesuai dengan port frontend Anda yang aktif
+    # Pastikan port sesuai (3000 atau 3001)
     frontend_url = f"http://localhost:3000/auth/callback?token={token}&user={encoded_user}"
     
     return RedirectResponse(url=frontend_url)
